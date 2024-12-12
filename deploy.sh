@@ -2,19 +2,27 @@
 
 set -e
 
+REPOS=(
+    "docker.io/jasonish/suricata"
+    "quay.io/jasonish/suricata"
+)
+
 REPO=${REPO:-"docker.io/jasonish/suricata"}
 MAJOR=$(basename $(pwd))
 VERSION=$(cat VERSION)
 LATEST=$(cat ../LATEST)
-CORES=$(cat /proc/cpuinfo | grep ^processor | wc -l)
-ARCHS=(amd64 arm64v8 arm32v6)
+ARCHS=(amd64 arm64)
 DOCKER=docker
 
-BUILT_IMAGES=()
+TAGS=()
 PUSHED_IMAGES=()
 PUSHED_MANIFESTS=()
 
 args=()
+
+if test -e Dockerfile.arm32; then
+    ARCHS+=(arm32)
+fi
 
 while [ "$#" -gt 0 ]; do
     key="$1"
@@ -31,15 +39,17 @@ while [ "$#" -gt 0 ]; do
         --manifest)
             manifest="yes"
             ;;
-        -q|--quiet)
-            docker_quiet="-q"
-            ;;
         *)
             args+=($key)
             ;;
     esac
     shift
 done
+
+if [[ "${manifest}" = "yes" && "${push}" != "yes" ]]; then
+    echo "error: --manifest requires --push"
+    exit 1
+fi
 
 set -- "${args[@]}"
 
@@ -51,40 +61,13 @@ build() {
         exit 1
     fi
 
-    configure_args=""
-
     tag="${REPO}:${VERSION}-${arch}"
+    TAG=${tag} ARCH=${arch} ../build.sh
+    TAGS+=("${tag}")
 
-    while [ "$#" -gt 0 ]; do
-        next="$1"
-        shift
-        case "${next}" in
-            profiling)
-                configure_args="${configure_args} --enable-profiling --enable-profiling-locks"
-                tag="${tag}-profiling"
-                ;;
-            *)
-                echo "error: unhandled argument: ${next}"
-                exit 1
-                ;;
-        esac
-    done
-
-    ${DOCKER} build --rm \
-        ${docker_quiet} \
-        --build-arg VERSION=${VERSION} \
-        --build-arg CORES=${CORES} \
-        --build-arg CONFIGURE_ARGS="${configure_args}" \
-        --tag ${tag} \
-        -f Dockerfile.${arch} \
-        .
-
-    BUILT_IMAGES+=("${tag}")
-
-    if [ "${push}" = "yes" ]; then
-        ${DOCKER} push ${tag}
-        PUSHED_IMAGES+=("${tag}")
-    fi
+    tag="${REPO}:${VERSION}-${arch}-profiling"
+    TAG=${tag} ARCH=${arch} ../build.sh profiling
+    TAGS+=("${tag}")
 }
 
 manifest() {
@@ -94,7 +77,7 @@ manifest() {
     for arch in "${ARCHS[@]}"; do
         if test -e Dockerfile.${arch}; then
             ${DOCKER} manifest create "${REPO}:${version}${variant}" \
-                -a "${REPO}:${VERSION}-${arch}${variant}"
+                      -a "${REPO}:${VERSION}-${arch}${variant}"
         fi
     done
 
@@ -106,41 +89,49 @@ manifest() {
         ${DOCKER} manifest push "${manifest_name}"
     elif [ "${DOCKER}" = "podman" ]; then
         ${DOCKER} manifest push --purge "${manifest_name}" \
-            docker://"${manifest_name}"
+                  docker://"${manifest_name}"
     else
         echo "error: unsupported docker command: ${DOCKER}"
         exit 1
     fi
 }
- 
-if [ "${build}" = "yes" ]; then
-    if [ "$1" = "" ]; then
-        for arch in "${ARCHS[@]}"; do
+
+if [[ "${build}" = "yes" ]]; then
+    for repo in "${REPOS[@]}"; do
+	      for arch in "${ARCHS[@]}"; do
             if test -e Dockerfile.${arch}; then
-                build "${arch}"
-                build "${arch}" "profiling"
+		            REPO=${repo} build "${arch}"
+		            REPO=${repo} build "${arch}" "profiling"
             fi
-        done
-    else
-        build "${@}"
-    fi
+	      done
+    done
 fi
 
-if [ "${manifest}" = "yes" ]; then
-    manifest ${VERSION}
-    manifest ${VERSION} "-profiling"
-    if [ "${MAJOR}" != "${VERSION}" ]; then
-        manifest ${MAJOR}
-        manifest ${MAJOR} "-profiling"
-    fi
-    if [ "${MAJOR}" = "${LATEST}" ]; then
-        manifest latest
-        manifest latest "-profiling"
-    fi
+if [[ "${push}" = "yes" ]]; then
+    for tag in "${TAGS[@]}"; do
+	      echo "===> Pushing ${tag}"
+	      ${DOCKER} push ${tag}
+	      PUSHED_IMAGES+=("${tag}")
+    done
+fi
+
+if [[ "${manifest}" = "yes" ]]; then
+    for repo in "${REPOS[@]}"; do
+	      REPO=${repo} manifest ${VERSION}
+	      REPO=${repo} manifest ${VERSION} "-profiling"
+	      if [ "${MAJOR}" != "${VERSION}" ]; then
+	          REPO=${repo} manifest ${MAJOR}
+	          REPO=${repo} manifest ${MAJOR} "-profiling"
+	      fi
+	      if [ "${MAJOR}" = "${LATEST}" ]; then
+	          REPO=${repo} manifest latest
+	          REPO=${repo} manifest latest "-profiling"
+	      fi
+    done
 fi
 
 echo "Tags built:"
-for tag in "${BUILT_IMAGES[@]}"; do
+for tag in "${TAGS[@]}"; do
     echo "- ${tag}"
 done
 
